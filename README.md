@@ -1,0 +1,155 @@
+# Workflow Control Plane
+
+Run GitHub Actions workflows through a clean, governed UI. Admins import repositories as **workspaces**, choose which workflows are exposed, and decide who can see or run them (or make a workspace public). Users sign in with **Microsoft Entra ID**, fill a typed form, and watch runs live.
+
+One Next.js codebase (no `src/`, no monorepo tools) → two processes:
+
+| Process | Command | Does |
+|---|---|---|
+| **web** | `next start` (standalone `server.js`) | UI, tRPC API, live updates (SSE), auth, GitHub webhook ingest |
+| **worker** | `node dist/worker.mjs` | Migrations, dispatch/verify, sync, webhook processing, polling, schedulers |
+
+Design documents: [`docs/design/`](docs/design) (start with `00-decisions-and-stack.md`).
+
+---
+
+## Stack
+
+Next.js 16 · React 19 · TypeScript 6 · tRPC 11 + TanStack Query 5 · Better Auth (Microsoft Entra ID) · Drizzle ORM · PostgreSQL 18 · Zod 4 · Tailwind CSS 4 · Zustand · nuqs · React Hook Form · Vitest · esbuild (worker bundle). Deployed to Azure App Service + Azure Database for PostgreSQL Flexible Server.
+
+## Layout
+
+```
+app/          Next.js routes only (pages, layouts, route handlers)
+features/     UI per feature (home, composer, run view, approvals, admin…)
+components/   shared UI (components/ui = base components)
+lib/          browser helpers: tRPC client, live stream, stores, utils
+shared/       Zod schemas, phases, event types — used by client and server
+server/       server-only code
+  core/         business modules: access · identity · workspaces · runs · observation · events · platform
+  github/       GitHub client + credential pool + adapters
+  db/           Drizzle schema, client, unit of work, migrator
+  auth/         Better Auth config + session helpers
+  trpc/         tRPC init + routers
+  realtime/     EventHub (Postgres LISTEN → SSE fan-out)
+worker/       worker entry + queue host + schedulers
+drizzle/      SQL migrations (authoritative), reference schema, schema-checks.sql
+tests/        unit tests
+docs/         design documents + example workflow
+```
+
+Folder boundaries are enforced by `eslint.config.mjs` import zones and the `server-only` marker (see `docs/design/07-code-design.md` §2).
+
+---
+
+## Run it locally
+
+**Prerequisites:** Node.js 24, pnpm, Docker, a Microsoft Entra app registration, a GitHub token for a test repository.
+
+```bash
+pnpm install
+cp .env.example .env.local          # fill in the values below
+docker compose up -d                # PostgreSQL 18
+pnpm db:migrate                     # applies drizzle/migrations
+pnpm dev                            # web on http://localhost:3000 + worker
+```
+
+### 1. Entra ID app registration
+- Platform **Web**, redirect URI `http://localhost:3000/api/auth/callback/microsoft`.
+- Create a client secret → `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET`, `MICROSOFT_TENANT_ID`.
+- **Token configuration → Add groups claim** (ID token, group IDs). Prefer "Groups assigned to the application" to stay under Entra's token group limit.
+- Optional: set `CP_ADMIN_GROUP_ID` to an Entra group whose members become app admins at sign-in.
+
+### 2. Become admin (if you didn't set `CP_ADMIN_GROUP_ID`)
+Sign in once, then:
+```sql
+update auth.users set role = 'admin' where email = 'you@company.com';
+```
+
+### 3. Add a GitHub credential
+Create a **fine-grained PAT** (ideally owned by a service account) for your test repo with *Actions: read & write, Contents: read, Metadata: read* (and *Webhooks: read & write* for webhook mode). Put it in `.env.local` as `GITHUB_TOKEN_1`, then in **Admin → Credentials** add it with secret `env:GITHUB_TOKEN_1`.
+
+> GitHub's limit is per **account**: several tokens of one account give failover, not capacity. Use tokens of different accounts or a GitHub App for more capacity (`docs/design/03-github-integration.md`).
+
+### 4. Import a repository
+**Admin → Workspaces → Import**: `owner/repo` → *Check access* → pick credentials → choose visibility → *Import & sync*. Then in the workspace settings expose workflows, grant users/groups, and set approval/concurrency rules.
+
+Locally there's no public URL, so workspaces use **polling mode** (runs appear within ~30 s). Set `PUBLIC_BASE_URL` (e.g. a tunnel) and `GITHUB_WEBHOOK_SECRET` for webhook mode.
+
+### 5. Prepare workflows
+Add a `_cp_tag` input and put it in `run-name` — see [`docs/workflow-example.yml`](docs/workflow-example.yml). Without it, the control plane can't prove a run wasn't created after a timeout, so it stops instead of risking a duplicate.
+
+---
+
+## Scripts
+
+| Script | Purpose |
+|---|---|
+| `pnpm dev` | web + worker in watch mode |
+| `pnpm build` | `next build` + esbuild worker bundle (`dist/worker.mjs`) |
+| `pnpm typecheck` · `pnpm lint` · `pnpm test` | TypeScript · ESLint (incl. boundaries) · Vitest |
+| `pnpm db:migrate` | Apply SQL migrations (the worker also does this on start) |
+| `pnpm db:check` | Run `drizzle/checks/schema-checks.sql` against `$DATABASE_URL` (use a scratch DB) |
+
+---
+
+## Deploy to Azure
+
+Resources (one per environment): App Service plan (Linux, Premium v3), **two** apps (`web`, `worker`) with staging slots, PostgreSQL Flexible Server 18 (private access, Entra auth), Key Vault, Application Insights, VNet. Details: `docs/design/08-repository-and-azure.md`.
+
+### Build artifacts (CI)
+```bash
+pnpm build
+pnpm package   # lays out artifacts/web and artifacts/worker
+# zip each folder and deploy: web -> web app, worker -> worker app
+```
+
+| | web app | worker app |
+|---|---|---|
+| Runtime | Node 24 LTS | Node 24 LTS |
+| Startup | `node server.js` | `node worker.mjs` |
+| Always On | on | **on** |
+| Health check | `/api/health` | `/health` |
+| ARR affinity | off | off |
+| `DATABASE_AUTH` | `entra` | `entra` |
+| `DATABASE_ROLE` | `cp_web` | `cp_worker` |
+| `DATABASE_MIGRATION_ROLE` | — | `cp_owner` |
+| `CP_WORKER_PROCESSING` | — | `on` (production slot), `off` (staging slot, **slot setting**) |
+
+Secrets (`BETTER_AUTH_SECRET`, `MICROSOFT_CLIENT_SECRET`, `GITHUB_WEBHOOK_SECRET`) as Key Vault references; `KEY_VAULT_URL` set on both apps. Give the web identity *Key Vault Secrets Officer* (it stores new GitHub tokens) and the worker *Key Vault Secrets User*.
+
+### Database roles (once, as the Entra admin of the server)
+```sql
+-- schema owner used for migrations and partition maintenance
+create role cp_owner nologin;
+grant create on database <db> to cp_owner;
+
+-- map each App Service managed identity to a database principal
+select * from pgaadauth_create_principal('<web-app-identity-name>', false, false);
+select * from pgaadauth_create_principal('<worker-app-identity-name>', false, false);
+
+-- after the first migration has created cp_web / cp_worker:
+grant cp_web    to "<web-app-identity-name>";
+grant cp_worker to "<worker-app-identity-name>";
+grant cp_owner  to "<worker-app-identity-name>";
+```
+Run the first migration as the server admin (or with `DATABASE_MIGRATION_ROLE=cp_owner`) so the objects are owned by `cp_owner`.
+
+---
+
+## Verification status (be explicit)
+
+| Checked | How |
+|---|---|
+| ✅ State machine, access rules, admission, ref patterns | 23 unit tests passing (pure modules, no packages needed) |
+| ✅ TypeScript state machine == database guard | Automated comparison: 40/40 transitions identical |
+| ✅ Pure modules type-check (strict, `noUncheckedIndexedAccess`) | `tsc` on `shared/`, access policy, admission |
+| ⚠️ Whole project type-check / `next build` | Not run: dependencies couldn't be installed in the authoring environment. Run `pnpm install && pnpm typecheck && pnpm build` first; expect small fixes where library types differ from what was assumed |
+| ⚠️ Dependency versions | Pinned to current majors (Next 16, tRPC 11, Better Auth 1, Drizzle 0.45 / 1.0 when GA, Zod 4…). Let pnpm resolve, then lock |
+| ⚠️ Database | Run `pnpm db:check` on a scratch PostgreSQL 18 (the SQL was written without a live database) |
+| ❌ Not included yet | Bicep templates, Playwright end-to-end tests, a fake GitHub server for offline development |
+
+## Notes on library assumptions to verify first
+- Better Auth: `advanced.database.generateId: false` (DB-generated UUIDv7 ids), custom `modelName`s, Microsoft provider `tenantId`, `databaseHooks.session.create`.
+- tRPC: `sse.ping` config, `httpSubscriptionLink`, `useSubscription` from `@trpc/tanstack-react-query`.
+- Drizzle: `.for('update', { skipLocked: true })`, `generatedAlwaysAs(sql…)`, errors wrapped with the Postgres error in `cause` (handled in `server/db/uow.ts`).

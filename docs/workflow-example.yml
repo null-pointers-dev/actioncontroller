@@ -1,0 +1,35 @@
+# Example: a workflow that works well with the control plane.
+# - `_cp_tag` lets the control plane find the exact run it started (no duplicates on retries)
+# - put the tag in `run-name` so it's visible and searchable
+# - typed inputs become a clean form (choice -> buttons, boolean -> switch, environment -> picker)
+name: Deploy
+run-name: Deploy ${{ inputs.environment }} · ${{ inputs.version }} · ${{ inputs._cp_tag }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: environment
+        required: true
+      version:
+        description: Version to deploy (semver)
+        required: true
+      dryRun:
+        type: boolean
+        default: false
+      _cp_tag:
+        description: Set by the control plane — leave empty
+        type: string
+        required: false
+      _cp_requested_by:
+        description: Set by the control plane — who asked
+        type: string
+        required: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "Deploying ${{ inputs.version }} to ${{ inputs.environment }} for ${{ inputs._cp_requested_by }}"

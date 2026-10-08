@@ -1,0 +1,58 @@
+@import 'tailwindcss';
+
+/* Design tokens (docs/06 §4): neutral surfaces, one accent, semantic status colors. */
+@theme {
+  --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+
+  --color-surface: #ffffff;
+  --color-surface-muted: #f6f7f9;
+  --color-border: #e4e6eb;
+  --color-text: #15171c;
+  --color-text-muted: #5d6370;
+  --color-accent: #3b5bdb;
+  --color-accent-fg: #ffffff;
+
+  --color-tone-neutral: #6b7280;
+  --color-tone-attention: #b7791f;
+  --color-tone-progress: #3b5bdb;
+  --color-tone-success: #2f855a;
+  --color-tone-danger: #c53030;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-surface: #111317;
+    --color-surface-muted: #181b21;
+    --color-border: #262a33;
+    --color-text: #e8eaee;
+    --color-text-muted: #9aa1ad;
+    --color-accent: #7c93f5;
+    --color-accent-fg: #0d0f13;
+    --color-tone-attention: #e3a33b;
+    --color-tone-progress: #7c93f5;
+    --color-tone-success: #4fbf86;
+    --color-tone-danger: #f07373;
+  }
+}
+
+html,
+body {
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
+body {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: 'tnum' 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}
