@@ -1,11 +1,11 @@
 -- =====================================================================
---  schema-checks.sql (v3) — executable proof of the database invariants.
---  Run on a SCRATCH PostgreSQL 18 database as a superuser:
---      psql -d cp_scratch -v ON_ERROR_STOP=1 -f schema.sql -f schema-checks.sql
---  One transaction, rolled back at the end. First failure stops with "FAIL:".
+--  schema-checks.sql — executable proof of the database invariants.
+--  Run automatically by `pnpm db:reset` (and `pnpm db:check`) right after the
+--  schema push, guards and BullMQ migrations — on an EMPTY database.
+--  One transaction, rolled back at the end: leaves no data behind.
+--  Each check prints "ok ..."; the first failure raises "FAIL: ...".
 -- =====================================================================
 
-\set ON_ERROR_STOP on
 BEGIN;
 
 CREATE SCHEMA cp_check;
@@ -182,28 +182,32 @@ INSERT INTO cp.events (type, version, subject, aggregate_type, aggregate_id, act
 VALUES ('cp.run_request.created', 1, 'run-requests/x', 'run_request', 'x', 'user', 'priya', cp_check.id('ws'), '{}');
 SELECT cp_check.ok(NOT EXISTS (SELECT 1 FROM cp.read_events('0'::xid8, 0, 1000) WHERE aggregate_id = 'x'),
     '5.1  an event is invisible to feed readers until its transaction commits');
-SELECT cp_check.rejects($$DELETE FROM cp.events WHERE aggregate_id = 'x'$$,
-    'append-only', '5.2  an emitted event cannot be deleted');
+SELECT cp_check.rejects($$UPDATE cp.events SET data = '{"x":1}' WHERE aggregate_id = 'x'$$,
+    'append-only', '5.2  an emitted event cannot be edited');
 
 -- =====================================================================
--- 6. Queue, leases, webhook inbox
+-- 6. Webhook inbox and retention
 -- =====================================================================
 DO $$
 DECLARE n int;
 BEGIN
-    PERFORM cp.enqueue('dispatch', 'R-x');
-    PERFORM cp.enqueue('dispatch', 'R-x');
-    PERFORM cp_check.ok((SELECT count(*) FROM cp.work_queue WHERE key = 'R-x') = 1, '6.1  duplicate enqueue -> one item');
-    SELECT count(*) INTO n FROM cp.claim_work('dispatch', 'w-1');
-    PERFORM cp_check.ok(n = 1, '6.2  a worker claims it');
-    SELECT count(*) INTO n FROM cp.claim_work('dispatch', 'w-2');
-    PERFORM cp_check.ok(n = 0, '6.3  nobody else can claim it meanwhile');
-    PERFORM cp_check.ok(cp.acquire_lease('checker', 'w-1', interval '30 seconds') = 1, '6.4  lease acquired, token 1');
-    PERFORM cp_check.ok(cp.acquire_lease('checker', 'w-2', interval '30 seconds') IS NULL, '6.5  lease is exclusive');
-    PERFORM cp_check.ok(cp.ingest_webhook('11111111-1111-4111-8111-111111111111', 'workflow_run', 'completed', 4711, '{}'),
-        '6.6  a new delivery is stored');
-    PERFORM cp_check.ok(NOT cp.ingest_webhook('11111111-1111-4111-8111-111111111111', 'workflow_run', 'completed', 4711, '{}'),
-        '6.7  the same delivery again is a duplicate');
+    INSERT INTO cp.webhook_deliveries (delivery_guid, event_type, payload)
+    VALUES ('11111111-1111-4111-8111-111111111111', 'workflow_run', '{}') ON CONFLICT DO NOTHING;
+    INSERT INTO cp.webhook_deliveries (delivery_guid, event_type, payload)
+    VALUES ('11111111-1111-4111-8111-111111111111', 'workflow_run', '{}') ON CONFLICT DO NOTHING;
+    GET DIAGNOSTICS n = ROW_COUNT;
+    PERFORM cp_check.ok(n = 0, '6.1  the same GitHub delivery stored twice is a no-op (PK dedupe)');
+END $$;
+
+SELECT cp_check.rejects($$DELETE FROM cp.events WHERE aggregate_id = 'x'$$,
+    'append-only', '6.2  events cannot be deleted by normal code');
+DO $$
+BEGIN
+    PERFORM set_config('cp.retention_delete', 'on', true);
+    DELETE FROM cp.events WHERE aggregate_id = 'x';
+    PERFORM set_config('cp.retention_delete', 'off', true);
+    PERFORM cp_check.ok(NOT EXISTS (SELECT 1 FROM cp.events WHERE aggregate_id = 'x'),
+        '6.3  ... but the retention job (explicit flag) can');
 END $$;
 
 -- =====================================================================
@@ -270,6 +274,14 @@ SELECT cp_check.rejects($$DELETE FROM cp.workspace_grants$$,
 SELECT cp_check.rejects($$UPDATE cp.run_requests SET inputs = '{}' WHERE id = cp_check.id('req-b')$$,
     'permission denied', '9.5  worker cannot touch WANTED columns');
 RESET ROLE;
+
+-- =====================================================================
+-- 10. BullMQ lives in the same database and both processes can use it
+-- =====================================================================
+SELECT cp_check.ok(EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'bullmq'),
+    '10.1 BullMQ schema exists (runMigrations ran)');
+SELECT cp_check.ok(has_schema_privilege('cp_web', 'bullmq', 'USAGE') AND has_schema_privilege('cp_worker', 'bullmq', 'USAGE'),
+    '10.2 web and worker roles can use the BullMQ schema');
 
 DO $$ BEGIN RAISE NOTICE '=== ALL SCHEMA CHECKS PASSED — rolling back ==='; END $$;
 ROLLBACK;

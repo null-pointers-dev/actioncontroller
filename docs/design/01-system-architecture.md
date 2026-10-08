@@ -89,7 +89,7 @@ flowchart TB
     OBS["observation<br/>runs/jobs mirror · webhooks · checker"]
     EVT["events<br/>outbox · feed · realtime"]
     GHC["github<br/>client · credential pool · mappers"]
-    PLT["platform<br/>db · unit of work · queue · leases · clock · config"]
+    PLT["platform<br/>db · unit of work · BullMQ queues · config"]
 
     RUN --> WS
     RUN --> AC
@@ -122,7 +122,7 @@ flowchart TB
 | observation | `workflow_runs`, `workflow_jobs`, `webhook_deliveries`, `inbox_seen` |
 | events | `events`, `event_consumers` |
 | github | `github_credentials` (health), `github_rate_buckets`, `github_http_cache` |
-| platform | `work_queue`, `leases` |
+| BullMQ (PostgreSQL backend) | `bullmq` schema — owned and migrated by BullMQ |
 
 ---
 
@@ -135,11 +135,11 @@ flowchart TB
 | **Verify** | `dispatch` queue (delayed) | Find run by correlation tag (any credential); adopt or re-dispatch after the grace window |
 | **Run actions** | `run-action` queue | Cancel / re-run via GitHub |
 | **Webhook processor** | New `webhook_deliveries` rows | Route `workflow_run`, `workflow_job`, `push`, `repository` events |
-| **Checker** | Every 15 s under a lease | Unfinished runs not confirmed for 60 s → fetch; polling-mode workspaces → list recent runs |
+| **Checker** | Every 15 s (BullMQ job scheduler) | Unfinished runs not confirmed for 60 s → fetch; polling-mode workspaces → list recent runs |
 | **Credential health** | Every 10 min + on failures | Validate each credential, read expiry header, mark `expired`/`invalid`, refresh workspace coverage, alert at 14 days to expiry |
-| **Approval expiry** | Every minute under a lease | Expire overdue approvals → reject their requests |
+| **Approval expiry** | Every minute (BullMQ job scheduler) | Expire overdue approvals → reject their requests |
 | **Slot release** | `run_request.completed` reactor | Wake the next queued deploy on that concurrency key |
-| **Housekeeping** | Daily under a lease | Partitions ahead, prune inbox, drop expired partitions |
+| **Housekeeping** | Every 6 h (BullMQ job scheduler) | Retention: events older than 13 months, processed webhook deliveries older than 30 days |
 
 ---
 
@@ -221,7 +221,7 @@ Unchanged. Phases: `pending → (awaiting_approval) → (waiting_for_slot) → d
 | Two production deploys | Partial unique index on concurrency key |
 | Access revoked before dispatch | Re-authorization in the dispatcher → `rejected` |
 | Workflow file changed | Sync on push; admission validates against the definition at the ref |
-| Web or worker crash | Leases/locks expire; another instance continues; nothing in memory matters |
+| Web or worker crash | BullMQ returns stalled jobs to the queue; another instance continues; nothing in memory matters |
 | Database failover | Brief outage; everything resumes from durable state |
 
 ---

@@ -30,6 +30,7 @@ function connectionConfig(): pg.PoolConfig {
 interface DbGlobals {
   pool?: pg.Pool;
   db?: Db;
+  queuePool?: pg.Pool;
 }
 // Survives Next.js dev hot-reload (one pool per process).
 const globals = globalThis as typeof globalThis & { __cpDb?: DbGlobals };
@@ -82,9 +83,29 @@ export async function withOwnerRole<T>(fn: (client: pg.PoolClient) => Promise<T>
   }
 }
 
+/**
+ * Pool handed to BullMQ's PostgreSQL backend. BullMQ doesn't change search_path on pools it
+ * didn't create, so we set it (and the least-privilege role) on every new connection.
+ */
+export function getQueuePool(): pg.Pool {
+  const g = globals.__cpDb!;
+  if (!g.queuePool) {
+    const env = getEnv();
+    g.queuePool = new pg.Pool({ ...connectionConfig(), max: env.QUEUE_POOL_MAX });
+    g.queuePool.on('error', (err) => console.error('[queue-db] idle client error', err));
+    g.queuePool.on('connect', (client) => {
+      const role = env.DATABASE_ROLE ? `set role ${pg.escapeIdentifier(env.DATABASE_ROLE)}; ` : '';
+      client.query(`${role}set search_path to bullmq, public`).catch((err) => console.error('[queue-db] session setup failed', err));
+    });
+  }
+  return g.queuePool;
+}
+
 export async function closeDb(): Promise<void> {
   const g = globals.__cpDb!;
+  await g.queuePool?.end();
   await g.pool?.end();
+  g.queuePool = undefined;
   g.pool = undefined;
   g.db = undefined;
 }

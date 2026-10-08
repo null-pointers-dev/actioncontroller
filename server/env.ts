@@ -6,6 +6,15 @@ const schema = z.object({
   DATABASE_URL: z.string().min(1),
   DATABASE_AUTH: z.enum(['password', 'entra']).default('password'),
   DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(100).default(10),
+  /** Pool size for BullMQ (each Worker also holds one dedicated LISTEN connection). */
+  QUEUE_POOL_MAX: z.coerce.number().int().min(1).max(100).default(10),
+  /**
+   * What the worker does to the database on start (docs/design/09):
+   *  migrate     apply generated drizzle migrations + guards + BullMQ migrations (production)
+   *  guards-only guards + BullMQ migrations; schema comes from `pnpm db:push` (development)
+   *  off         nothing
+   */
+  DB_SETUP_ON_START: z.enum(['migrate', 'guards-only', 'off']).optional(),
   /** Role every pooled connection switches to (cp_web / cp_worker). Empty locally. */
   DATABASE_ROLE: z.string().optional().transform((v) => v || undefined),
   /** Role used for migrations and partition DDL (owner of the schemas). Empty locally. */

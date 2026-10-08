@@ -3,7 +3,7 @@ import { and, asc, eq } from 'drizzle-orm';
 import { canTransition, isTerminal, type Phase } from '@/shared/phases';
 import { db, enqueueAfterCommit, recordEvent, unitOfWork, type Actor } from '@/server/db/uow';
 import { runRequests, type Condition, type RunRequestRow } from '@/server/db/schema';
-import { Queues } from '../platform/queue';
+import { Queues } from '@/server/jobs/queues';
 
 export const SYSTEM_ACTOR: Actor = { kind: 'system', id: 'dispatcher' };
 

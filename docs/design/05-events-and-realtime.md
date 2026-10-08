@@ -21,7 +21,7 @@ flowchart LR
         S2["SSE subscriber (tab 2)"]
     end
     subgraph WRK["Worker"]
-        C["ConsumerRunner<br/>(cursor in event_consumers)"]
+        C["Worker<br/>(BullMQ jobs)"]
     end
     S --> E --> N
     N --> L --> R --> EM
@@ -63,18 +63,9 @@ flowchart LR
 
 Scaling: every web instance runs its own EventHub. N instances = N LISTEN connections + N cheap reads per batch — fine for this system's volume.
 
-## 4. Reacting to events in the worker
+## 4. Reacting in the worker
 
-`ConsumerRunner` gives each internal reactor a name, a cursor row in `cp.event_consumers`, and a lease (one active runner per reactor). A reactor's database effects and its cursor advance commit together — effectively exactly-once for database work.
-
-| Reactor | On | Does |
-|---|---|---|
-| `slot-release` | `cp.run_request.completed` | Enqueue the next `waiting_for_slot` request on the same concurrency key |
-| `approval-dispatch` | `cp.approval.approved` | Enqueue `dispatch:<request>` |
-| `workflow-resync` | `cp.workspace.push_to_workflows` | Enqueue definition sync for that ref |
-| `access-cache` | `cp.workspace.grant_*`, `cp.identity.role_changed` | Invalidate per-user access caches (web listens too) |
-
----
+Follow-up work is not driven by reading the event table: the code that makes a change also enqueues the BullMQ job that should react to it, right after the commit (`enqueueAfterCommit`). Examples: a finished deploy wakes the next queued deploy on the same concurrency key; an approval enqueues the dispatch. If a process dies between commit and enqueue, the checker's sweepers find the stuck request or delivery and enqueue it — a lost signal costs latency, never correctness.
 
 ## 5. Event catalog
 

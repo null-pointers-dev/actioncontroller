@@ -4,26 +4,19 @@ import { getDb } from '@/server/db/client';
 import { db, enqueueAfterCommit, unitOfWork } from '@/server/db/uow';
 import { webhookDeliveries, workspaces } from '@/server/db/schema';
 import { toJobSnapshot, toRunSnapshot } from '@/server/github/mappers';
-import { Queues } from '../platform/queue';
+import { Queues } from '@/server/jobs/queues';
 import { applyJobSnapshot, applyRunSnapshot } from './apply';
 
 type Payload = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 const MAX_ATTEMPTS = 10;
 
-/** Worker step: process stored GitHub deliveries (the HTTP endpoint only stores them). */
-export async function processPendingDeliveries(limit = 25): Promise<number> {
-  const pending = await getDb()
-    .select({ receivedAt: webhookDeliveries.receivedAt, guid: webhookDeliveries.deliveryGuid })
-    .from(webhookDeliveries)
-    .where(and(inArray(webhookDeliveries.processStatus, ['pending', 'failed']), sql`${webhookDeliveries.attempts} < ${MAX_ATTEMPTS}`))
-    .orderBy(webhookDeliveries.receivedAt)
-    .limit(limit);
-  for (const p of pending) await processOne(p.receivedAt, p.guid);
-  return pending.length;
-}
-
-async function processOne(receivedAt: Date, guid: string): Promise<void> {
-  const key = and(eq(webhookDeliveries.receivedAt, receivedAt), eq(webhookDeliveries.deliveryGuid, guid));
+/**
+ * Queue `webhook`, key = delivery GUID. The HTTP endpoint only verifies, stores and enqueues;
+ * this does the work. Throws on failure so BullMQ retries with backoff; after 10 attempts the
+ * delivery is marked dead (kept for inspection and replay).
+ */
+export async function processDelivery(guid: string): Promise<void> {
+  const key = eq(webhookDeliveries.deliveryGuid, guid);
   try {
     await unitOfWork({ actor: { kind: 'github' } }, async () => {
       const [d] = await db()
@@ -32,7 +25,7 @@ async function processOne(receivedAt: Date, guid: string): Promise<void> {
         .where(and(key, inArray(webhookDeliveries.processStatus, ['pending', 'failed'])))
         .for('update', { skipLocked: true })
         .limit(1);
-      if (!d) return;
+      if (!d) return; // already processed, or another worker has it
       const outcome = await handle(d.eventType, d.payload as Payload);
       await db()
         .update(webhookDeliveries)
@@ -48,6 +41,7 @@ async function processOne(receivedAt: Date, guid: string): Promise<void> {
         lastError: (err as Error).message.slice(0, 1000),
       })
       .where(key);
+    throw err;
   }
 }
 

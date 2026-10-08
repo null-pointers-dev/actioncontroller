@@ -18,7 +18,7 @@ import { authorize, capabilitiesFor, visibleWorkspaceIds } from '../access/acces
 import type { Principal } from '../access/policy';
 import { AdmissionRejected, Conflict, Forbidden, NotFound, type Problem } from '../errors';
 import { displayNames } from '../identity/identity';
-import { Queues } from '../platform/queue';
+import { Queues } from '@/server/jobs/queues';
 import { ensureDefinition, loadWorkflow } from '../workspaces/workspaces';
 import { admit } from './admission';
 import { withCondition } from './lifecycle';

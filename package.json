@@ -8,10 +8,10 @@
   },
   "packageManager": "pnpm@10.18.0",
   "scripts": {
-    "dev": "concurrently -n web,worker -c blue,magenta \"npm run dev:web\" \"npm run dev:worker\"",
+    "dev": "concurrently -n web,worker -c blue,magenta \"pnpm dev:web\" \"pnpm dev:worker\"",
     "dev:web": "next dev",
-    "dev:worker": "NODE_OPTIONS=--conditions=react-server tsx watch --env-file=.env worker/main.ts",
-    "build": "npm run build:web && npm run build:worker",
+    "dev:worker": "NODE_OPTIONS=--conditions=react-server tsx watch --env-file=.env.local worker/main.ts",
+    "build": "pnpm build:web && pnpm build:worker",
     "build:web": "next build",
     "build:worker": "node scripts/build-worker.mjs",
     "start:web": "node .next/standalone/server.js",
@@ -20,9 +20,13 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "test": "vitest run",
-    "db:migrate": "NODE_OPTIONS=--conditions=react-server tsx --env-file=.env scripts/migrate.ts",
-    "db:check": "psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -f drizzle/checks/schema-checks.sql",
-    "package": "node scripts/prepare-artifacts.mjs"
+    "package": "node scripts/prepare-artifacts.mjs",
+    "db:push": "NODE_OPTIONS=--conditions=react-server tsx --env-file=.env.local scripts/db.ts push",
+    "db:reset": "NODE_OPTIONS=--conditions=react-server tsx --env-file=.env.local scripts/db.ts reset",
+    "db:check": "NODE_OPTIONS=--conditions=react-server tsx --env-file=.env.local scripts/db.ts check",
+    "db:deploy": "NODE_OPTIONS=--conditions=react-server tsx --env-file=.env.local scripts/db.ts deploy",
+    "db:generate": "drizzle-kit generate",
+    "db:studio": "drizzle-kit studio"
   },
   "dependencies": {
     "@azure/identity": "^4.10.0",
@@ -35,6 +39,7 @@
     "@trpc/server": "^11.6.0",
     "@trpc/tanstack-react-query": "^11.6.0",
     "better-auth": "^1.3.0",
+    "bullmq": "^6.3.4",
     "clsx": "^2.1.1",
     "drizzle-orm": "^0.45.0",
     "lucide-react": "^0.540.0",

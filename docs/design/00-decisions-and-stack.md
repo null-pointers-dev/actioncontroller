@@ -17,7 +17,9 @@ Research date: October 2026. "Pin at setup" means: install the current stable mi
 | P5 | **GitHub is called through a pool of credentials.** | Several tokens / App installations; automatic failover on expiry, revocation or rate limits. See `03-github-integration.md`. |
 | P6 | **All UI ↔ server communication is a typed API (tRPC).** | No Server Actions. HTTP route handlers only for webhooks, auth and health. |
 | P7 | **One codebase, two processes** (web + worker), deployed to Azure App Service with Azure Database for PostgreSQL. | |
-| P8 | **The core (state, rules, events) is unchanged in spirit.** | Intent vs mirror, state machine, verify-before-retry, outbox events, Postgres queue. |
+| P8 | **The core (state, rules, events) is unchanged in spirit.** | Intent vs mirror, state machine, verify-before-retry, outbox events. |
+| P9 | **No manual migrations.** | Schema = `server/db/schema.ts` (drizzle-kit); guards = idempotent `drizzle/guards.sql`; BullMQ migrates its own schema. All applied automatically. |
+| P10 | **BullMQ (PostgreSQL backend) for all background work.** | Queues, retries with backoff, delays, deduplication and job schedulers — inside the same PostgreSQL. |
 
 ---
 
@@ -31,7 +33,8 @@ Research date: October 2026. "Pin at setup" means: install the current stable mi
 | Language | **TypeScript** | 6.x in the repo; TS 7's native compiler optional for fast CI type-checks | TS 7.0 has no stable programmatic API until 7.1, and Next.js's build-time type check uses that API — keep TS 6 as the project compiler until Next supports 7 |
 | API layer | **tRPC v11** + **TanStack Query v5** | 11.x | Mature (since 2020), large ecosystem; v11 subscriptions run over **SSE** with resumable `tracked()` ids; first-party TanStack Query integration |
 | Auth | **Better Auth** | 1.x | Self-hosted, sessions in our Postgres via its Drizzle adapter, Microsoft Entra ID provider; Auth.js is now part of Better Auth, so this is where that ecosystem's long-term investment goes |
-| ORM / migrations | **Drizzle ORM + drizzle-kit** | 1.0 if GA at setup, else latest 0.x stable | SQL-transparent, no engine binary, handles our Postgres-specific needs via `sql` and custom migrations. As of mid-2026 1.0 was in release candidate while npm `latest` was still 0.x; the core team joined PlanetScale in March 2026 (strong maintenance signal) |
+| Background jobs | **BullMQ 6 — PostgreSQL backend** | 6.x (PostgreSQL support since 6.0, July 2026) | Same Queue/Worker/scheduler API as Redis BullMQ; jobs live in the `bullmq` schema of our database — no Redis to run. See `09-jobs-and-database-lifecycle.md` |
+| ORM / schema lifecycle | **Drizzle ORM + drizzle-kit** — no hand-written migrations: `push` in development, generated migrations in production | 1.0 if GA at setup, else latest 0.x stable | SQL-transparent, no engine binary, handles our Postgres-specific needs via `sql` and custom migrations. As of mid-2026 1.0 was in release candidate while npm `latest` was still 0.x; the core team joined PlanetScale in March 2026 (strong maintenance signal) |
 | Validation | **Zod 4** | 4.x | Standard Schema compatible; one schema validates tRPC input, renders forms, documents events |
 | Database | **PostgreSQL 18** on **Azure Database for PostgreSQL Flexible Server** | 18 (GA on Azure, with Entra ID authentication) | `uuidv7()`, `xid8` feed, partial indexes, generated columns; passwordless auth with managed identity |
 | UI components | **shadcn/ui on Base UI** + **Tailwind CSS v4** | Base UI 1.x | Base UI is shadcn/ui's default since July 2026, stable since 1.0 (Dec 2025), built by the Radix creators. shadcn components are *copied into our repo*, so there is no library lock-in |

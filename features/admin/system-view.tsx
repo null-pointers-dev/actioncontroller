@@ -10,16 +10,19 @@ export function SystemView() {
   const s = status.data;
   return (
     <div className="flex flex-col gap-8">
-      <PageHeader title="System" subtitle="Queues, webhooks, drift and sync health." />
+      <PageHeader title="System" subtitle="BullMQ queues (in PostgreSQL), webhooks, drift and sync health." />
       <section>
         <SectionTitle>Queues</SectionTitle>
         <Card className="grid gap-2 text-sm sm:grid-cols-3">
-          {s?.queues.length ? s.queues.map((q) => (
+          {s?.queues.map((q) => (
             <div key={q.queue}>
               <p className="font-medium">{q.queue}</p>
-              <p className="text-text-muted">{q.depth} waiting · {q.locked} in progress · oldest {q.oldest_seconds ?? 0}s</p>
+              <p className="text-text-muted">
+                {(q.waiting ?? 0) + (q.prioritized ?? 0)} waiting · {q.active ?? 0} active · {q.delayed ?? 0} delayed
+                {q.failed ? <span className="text-tone-danger"> · {q.failed} failed</span> : null}
+              </p>
             </div>
-          )) : <p className="text-text-muted">All queues empty.</p>}
+          ))}
         </Card>
       </section>
       <section>

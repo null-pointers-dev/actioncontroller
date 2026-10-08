@@ -21,7 +21,7 @@ Folder layout and boundaries: `07-code-design.md` §1–2. Everything lives in *
 | `typecheck` | `tsc --noEmit` (TypeScript 6; optional fast check with TS 7's native compiler in CI) |
 | `lint` / `format` | ESLint (incl. import zones) / Prettier |
 | `test` · `test:integration` · `test:e2e` | Vitest unit · Vitest + Testcontainers · Playwright |
-| `db:generate` · `db:migrate` · `db:check` | drizzle-kit generate · apply migrations · run `drizzle/checks/schema-checks.sql` |
+| `db:push` · `db:reset` · `db:check` · `db:generate` · `db:deploy` | See `09-jobs-and-database-lifecycle.md` |
 | `seed` | Dev data: admin, sample users, a sandbox workspace |
 
 ### 1.2 Dependency policy
@@ -42,7 +42,7 @@ Folder layout and boundaries: `07-code-design.md` §1–2. Everything lives in *
 | Artifact | Contents | Deployed to |
 |---|---|---|
 | `web.zip` | `.next/standalone/` + `.next/static/` + `public/` | web app (`node server.js`) |
-| `worker.zip` | `dist/worker.mjs` (+ source map) + `drizzle/` migrations | worker app (`node worker.mjs`) |
+| `worker.zip` | `dist/worker.mjs` (+ source map) + `drizzle/` (generated migrations, guards, checks) | worker app (`node worker.mjs`) |
 
 ---
 
@@ -88,7 +88,7 @@ flowchart TB
 |---|---|---|
 | Runtime | Node 24 LTS (Linux) | Node 24 LTS (Linux) |
 | Startup | `node server.js` (standalone) | `node worker.mjs` |
-| Instances | 2+ (autoscale on CPU / requests) | 1–2 (leases make extra instances safe) |
+| Instances | 2+ (autoscale on CPU / requests) | 1–2 (BullMQ distributes jobs; schedulers run once per tick) |
 | Always On | on | **on** (required: no requests keep it awake) |
 | Health check path | `/api/health` | `/health` on the worker's tiny HTTP server |
 | HTTP/2 | on | — |
@@ -130,14 +130,14 @@ flowchart LR
     C --> D["Integration + API tests<br/>Testcontainers"]
     D --> E["Build<br/>web standalone · worker bundle<br/>(.next/cache restored)"]
     E --> F["E2E<br/>Playwright + fake GitHub"]
-    F --> G["Deploy to staging slots<br/>worker first (runs migrations) → web"]
+    F --> G["Deploy to staging slots<br/>worker first (applies generated migrations + guards + BullMQ schema) → web"]
     G --> H["Smoke tests on slots"]
     H --> I["Swap slots<br/>(production on tag + approval)"]
 ```
 
 Plain scripts, no task runner: the pipeline calls `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm db:check`, `pnpm build`, `pnpm test:e2e`. Caching: the pnpm store and `.next/cache` via the CI cache action.
 
-**Migrations** run when the **worker** starts (staging slot first), under a Postgres advisory lock so only one instance applies them. The staging slot carries a **slot-sticky** setting `CP_WORKER_PROCESSING=off`, so the new worker only migrates and reports health until the swap; after the swap the production slot's setting (`on`) applies and it starts claiming work. Migrations are **expand-only** within a release (add now, remove in a later release), so the old web keeps working while the new schema is applied.
+**Database setup** (generated drizzle migrations → guards → BullMQ schema) runs when the **worker** starts (staging slot first), under a Postgres advisory lock so only one instance applies them. The staging slot carries a **slot-sticky** setting `CP_WORKER_PROCESSING=off`, so the new worker only migrates and reports health until the swap; after the swap the production slot's setting (`on`) applies and it starts claiming work. Migrations are **expand-only** within a release (add now, remove in a later release), so the old web keeps working while the new schema is applied.
 
 ---
 

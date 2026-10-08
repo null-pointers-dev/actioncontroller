@@ -3,7 +3,7 @@ import { and, eq, sql } from 'drizzle-orm';
 import { getDb } from '@/server/db/client';
 import { workflowRuns, workspaces } from '@/server/db/schema';
 import { getRunAttempt, listJobs, listRecentRuns } from '@/server/github/api';
-import { enqueue, Queues } from '../platform/queue';
+import { enqueue, Queues } from '@/server/jobs/queues';
 import { applyJobSnapshot, applyRunSnapshot } from './apply';
 
 /** Leased scheduler tick (every ~15 s): finds what needs confirming and queues it. */
@@ -13,7 +13,7 @@ export async function scheduleChecks(): Promise<void> {
     select run_id::text, run_attempt from cp.workflow_runs
      where status <> 'completed' and last_seen_at < now() - interval '60 seconds'
      order by last_seen_at limit 200`);
-  for (const r of stale.rows) await enqueue(Queues.check, `${r.run_id}:${r.run_attempt}`, 0, 50);
+  for (const r of stale.rows) await enqueue(Queues.check, `${r.run_id}:${r.run_attempt}`, { priority: 50 });
 
   // Polling workspaces: every 30 s while runs are active, every 2 min otherwise.
   // Webhook workspaces: a warm listing every 5 min as a safety net.
@@ -26,7 +26,7 @@ export async function scheduleChecks(): Promise<void> {
                 and w.runs_listed_until < now() - interval '30 seconds')
             or (w.update_mode = 'polling' and w.runs_listed_until < now() - interval '2 minutes')
             or w.runs_listed_until < now() - interval '5 minutes')`);
-  for (const w of due.rows) await enqueue(Queues.poll, w.id, 0, 60);
+  for (const w of due.rows) await enqueue(Queues.poll, w.id, { priority: 60 });
 
   // Requests that should be moving but aren't (crashed worker, lost wake-up, cancel waiting).
   const stuck = await db.execute<{ id: string }>(sql`
@@ -35,7 +35,15 @@ export async function scheduleChecks(): Promise<void> {
             and updated_at < now() - interval '2 minutes')
         or (phase in ('dispatched', 'running') and cancel_requested)
      limit 200`);
-  for (const r of stuck.rows) await enqueue(Queues.dispatch, r.id, 0, 30);
+  for (const r of stuck.rows) await enqueue(Queues.dispatch, r.id, { priority: 30 });
+
+  // Webhook deliveries stored but never processed (enqueue lost after the insert, or failed).
+  const deliveries = await db.execute<{ delivery_guid: string }>(sql`
+    select delivery_guid from cp.webhook_deliveries
+     where process_status in ('pending', 'failed') and attempts < 10
+       and received_at < now() - interval '60 seconds'
+     order by received_at limit 200`);
+  for (const d of deliveries.rows) await enqueue(Queues.webhook, d.delivery_guid, { jobId: d.delivery_guid });
 }
 
 /** Queue `check`: confirm one unfinished run attempt (and its jobs) with GitHub. */

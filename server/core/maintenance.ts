@@ -1,10 +1,10 @@
 import 'server-only';
 import { eq, sql } from 'drizzle-orm';
-import { getDb, withOwnerRole } from '@/server/db/client';
+import { getDb } from '@/server/db/client';
 import { db, enqueueAfterCommit, recordEvent, unitOfWork } from '@/server/db/uow';
 import { githubCredentials } from '@/server/db/schema';
 import { refreshRateLimit } from '@/server/github/api';
-import { Queues } from './platform/queue';
+import { Queues } from '@/server/jobs/queues';
 import { revalidateCredential } from './workspaces/credentials';
 
 /** Every minute: pending approvals past their TTL expire; the dispatcher then rejects the request. */
@@ -51,11 +51,26 @@ export async function credentialHealth(): Promise<void> {
      where status = 'active' and expires_at is not null and expires_at < now()`);
 }
 
-/** Daily: partitions ahead, prune the webhook dedupe table. */
+const EVENTS_RETENTION = '13 months';
+const DELIVERIES_RETENTION = '30 days';
+
+/**
+ * Daily: retention. Events are append-only (trigger); the retention job is the one place
+ * allowed to delete them, by setting cp.retention_delete for its own transaction only.
+ * Deletes in batches so no single transaction gets large.
+ */
 export async function housekeeping(): Promise<void> {
-  await withOwnerRole(async (client) => {
-    await client.query(`select cp.ensure_month_partitions('events', 2)`);
-    await client.query(`select cp.ensure_month_partitions('webhook_deliveries', 2)`);
-  });
-  await getDb().execute(sql`delete from cp.inbox_seen where seen_at < now() - interval '14 days'`);
+  for (let i = 0; i < 100; i++) {
+    const deleted = await getDb().transaction(async (tx) => {
+      await tx.execute(sql`select set_config('cp.retention_delete', 'on', true)`);
+      const res = await tx.execute(sql`
+        delete from cp.events where seq in (
+          select seq from cp.events where occurred_at < now() - ${EVENTS_RETENTION}::interval limit 5000)`);
+      return res.rowCount ?? 0;
+    });
+    if (deleted < 5000) break;
+  }
+  await getDb().execute(sql`
+    delete from cp.webhook_deliveries
+     where received_at < now() - ${DELIVERIES_RETENTION}::interval and process_status in ('applied', 'ignored', 'dead')`);
 }

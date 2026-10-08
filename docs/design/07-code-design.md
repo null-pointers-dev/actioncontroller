@@ -30,10 +30,9 @@ control-plane/
 │   ├── realtime/               EventHub (LISTEN + in-process fan-out for SSE)
 │   └── container.ts            createCore(deps) — builds services for a process
 ├── worker/                     worker entry point and runtime (imports server/*, never app/ or components/)
-│   ├── main.ts                 config → migrate → createCore → WorkerHost → schedulers → reactors → health server
-│   ├── host/                   WorkerHost, QueueConsumer, LeasedScheduler, ConsumerRunner
+│   ├── main.ts                 health server → database setup → BullMQ workers → job schedulers
 │   └── health.ts               tiny HTTP server for App Service health checks
-├── drizzle/                    SQL migrations (generated + hand-written triggers/functions), reference schema, schema-checks.sql
+├── drizzle/                    generated migrations (prod) · guards.sql · bullmq-grants.sql · checks/schema-checks.sql
 ├── e2e/                        Playwright journeys + fake GitHub server
 ├── scripts/                    build-worker (esbuild), seed, dev helpers
 ├── infra/                      Bicep for Azure
@@ -142,7 +141,7 @@ The web process creates the container once (module singleton stored on `globalTh
 | `Database` | Drizzle over `node-postgres`; separate connection for `LISTEN`; passwordless Entra auth with the managed identity (token per new connection) |
 | `UnitOfWork.run(fn)` | Transaction via `db.transaction`, exposed through `AsyncLocalStorage`; collects domain events → inserts into `cp.events`; `NOTIFY cp_events`; inserts work items; commits or rolls back everything |
 | Repositories | Load by id; save with `WHERE resource_version = expected` → zero rows = `ConcurrencyError` |
-| `WorkQueue` · `Leases` | Over the SQL functions in the schema |
+| `server/jobs/queues.ts` | BullMQ queues on the PostgreSQL backend: `enqueue` (signal), `followUp` (throttled retry-later), job schedulers |
 | `Config` | Zod-validated environment (`shared/env` schema); process exits on invalid config |
 | Errors | `ValidationError`, `AdmissionRejected`, `NotFound`, `Forbidden`, `Conflict`, `UpstreamUnavailable` → mapped to tRPC codes in `server/trpc` |
 
@@ -215,7 +214,7 @@ Rule: never `await` GitHub inside `UnitOfWork.run` — transaction → commit �
 | Dev | `next dev` | `tsx watch worker/main.ts` (with `--conditions=react-server`) |
 | Build | `next build` (`output: 'standalone'`) | `esbuild` → `dist/worker.mjs` (one file, all dependencies bundled, path alias resolved, `react-server` condition) |
 | Run | `node server.js` | `node dist/worker.mjs` |
-| Starts | tRPC, auth, webhook ingest, SSE + EventHub | migrations (advisory lock) → queues → schedulers → reactors → health server |
+| Starts | tRPC, auth, webhook ingest, SSE + EventHub | database setup (advisory lock) → BullMQ workers → job schedulers → health server |
 
 ---
 

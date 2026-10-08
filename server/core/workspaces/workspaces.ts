@@ -28,7 +28,7 @@ import { authorize, capabilitiesFor, requireAdmin, visibleWorkspaceIds } from '.
 import type { Capabilities, Principal } from '../access/policy';
 import { Conflict, NotFound, ValidationError } from '../errors';
 import { displayNames, findUserIdByEmail } from '../identity/identity';
-import { Queues } from '../platform/queue';
+import { Queues } from '@/server/jobs/queues';
 import { parseWorkflowFile } from './definition-parser';
 
 type Ctx = { principal: Principal; correlationId?: string };

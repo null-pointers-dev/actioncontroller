@@ -10,6 +10,7 @@ import {
   setCredentialPriority,
   setCredentialStatus,
 } from '@/server/core/workspaces/credentials';
+import { getQueue, Queues } from '@/server/jobs/queues';
 import { adminProcedure, router } from '../init';
 
 export const credentialsRouter = router({
@@ -31,11 +32,12 @@ export const systemRouter = router({
   status: adminProcedure.query(async () => {
     const db = getDb();
     const [queues, deliveries, drift, workspaces] = await Promise.all([
-      db.execute<{ queue: string; depth: number; oldest_seconds: number | null; locked: number }>(sql`
-        select queue, count(*)::int as depth,
-               extract(epoch from now() - min(enqueued_at))::int as oldest_seconds,
-               count(*) filter (where locked_until > now())::int as locked
-          from cp.work_queue group by queue order by queue`),
+      Promise.all(
+        Object.values(Queues).map(async (name) => ({
+          queue: name,
+          ...(await getQueue(name).getJobCounts('waiting', 'active', 'delayed', 'prioritized', 'failed')),
+        })),
+      ),
       db.execute<{ status: string; n: number }>(sql`
         select process_status as status, count(*)::int as n from cp.webhook_deliveries
          where received_at > now() - interval '24 hours' group by process_status`),
@@ -46,7 +48,7 @@ export const systemRouter = router({
         select id, display_name, status, update_mode, last_synced_at, status_reason from cp.workspaces order by display_name`),
     ]);
     return {
-      queues: queues.rows,
+      queues,
       deliveries: deliveries.rows,
       driftCorrectionsLastHour: drift.rows[0]?.n ?? 0,
       workspaces: workspaces.rows,

@@ -2,6 +2,7 @@ import 'server-only';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { sql } from 'drizzle-orm';
 import type { EventType } from '@/shared/events';
+import { enqueue, type QueueName } from '../jobs/queues';
 import { getDb, type Db } from './client';
 import { events } from './schema';
 
@@ -27,7 +28,7 @@ export interface DomainEvent {
 }
 
 interface WorkItem {
-  queue: string;
+  queue: QueueName;
   key: string;
   delaySeconds: number;
   priority: number;
@@ -49,7 +50,10 @@ export function db(): Executor {
 }
 
 /**
- * One transaction containing the state change, its events and its work items.
+ * One transaction containing the state change and its events. Work items (BullMQ jobs) are
+ * enqueued right AFTER the commit, so a job never points at uncommitted state. If the process
+ * dies between commit and enqueue, the leased sweepers (observation/checker.ts) find the stuck
+ * key and enqueue it — the system is level-triggered, so a lost signal only costs latency.
  * Nested calls join the outer unit. Never await a network call inside `fn`.
  */
 export async function unitOfWork<T>(
@@ -57,9 +61,10 @@ export async function unitOfWork<T>(
   fn: () => Promise<T>,
 ): Promise<T> {
   if (storage.getStore()) return fn();
-  return getDb().transaction(async (tx) => {
+  let work: WorkItem[] = [];
+  const result = await getDb().transaction(async (tx) => {
     const ctx: UnitContext = { tx, actor: options.actor, correlationId: options.correlationId, events: [], work: [] };
-    const result = await storage.run(ctx, fn);
+    const value = await storage.run(ctx, fn);
 
     if (ctx.events.length > 0) {
       await tx.insert(events).values(
@@ -82,13 +87,21 @@ export async function unitOfWork<T>(
       // Delivered by PostgreSQL only if this transaction commits.
       await tx.execute(sql`select pg_notify('cp_events', '')`);
     }
-    for (const w of ctx.work) {
-      await tx.execute(
-        sql`select cp.enqueue(${w.queue}, ${w.key}, ${`${w.delaySeconds} seconds`}::interval, ${w.priority})`,
-      );
-    }
-    return result;
+    work = ctx.work;
+    return value;
   });
+  if (work.length > 0) await flushWork(work);
+  return result;
+}
+
+async function flushWork(work: WorkItem[]): Promise<void> {
+  for (const w of work) {
+    try {
+      await enqueue(w.queue, w.key, { delayMs: w.delaySeconds * 1000, priority: w.priority });
+    } catch (err) {
+      console.error(`[uow] enqueue ${w.queue}:${w.key} failed (sweepers will recover)`, (err as Error).message);
+    }
+  }
 }
 
 function current(): UnitContext {
@@ -101,7 +114,7 @@ export function recordEvent(event: DomainEvent): void {
   current().events.push(event);
 }
 
-export function enqueueAfterCommit(queue: string, key: string, opts: { delaySeconds?: number; priority?: number } = {}): void {
+export function enqueueAfterCommit(queue: QueueName, key: string, opts: { delaySeconds?: number; priority?: number } = {}): void {
   current().work.push({ queue, key, delaySeconds: opts.delaySeconds ?? 0, priority: opts.priority ?? 100 });
 }
 
